@@ -30,7 +30,6 @@ module Routing.Duplex
   ) where
 
 import Prelude
-
 import Control.Alt (class Alt)
 import Control.Alternative (class Alternative)
 import Data.Either (Either)
@@ -54,34 +53,36 @@ import Type.Data.RowList (RLProxy(..))
 -- |
 -- | For most purposes, you'll likely want `RouterDuplex'` which uses the same
 -- | type for both parameters.
-data RouteDuplex i o = RouteDuplex (i -> RoutePrinter) (RouteParser o)
+data RouteDuplex r i o
+  = RouteDuplex (i -> RoutePrinter r) (RouteParser r o)
 
 -- | A type restricted variant of `RouteDuplex` where input and output are
 -- | the same type. This type will typically be your custom `Route` data type
 -- | representing valid routes within your application.
-type RouteDuplex' a = RouteDuplex a a
+type RouteDuplex' r a
+  = RouteDuplex r a a
 
-derive instance functorRouteDuplex :: Functor (RouteDuplex i)
+derive instance functorRouteDuplex :: Functor (RouteDuplex r i)
 
-instance applyRouteDuplex :: Apply (RouteDuplex i) where
+instance applyRouteDuplex :: Apply (RouteDuplex r i) where
   apply (RouteDuplex encl decl) (RouteDuplex encr decr) = RouteDuplex (append <$> encl <*> encr) (decl <*> decr)
 
-instance applicativeRouteDuplex :: Applicative (RouteDuplex i) where
+instance applicativeRouteDuplex :: Applicative (RouteDuplex r i) where
   pure = RouteDuplex (const mempty) <<< pure
 
-instance profunctorRouteDuplex :: Profunctor RouteDuplex where
+instance profunctorRouteDuplex :: Profunctor (RouteDuplex r) where
   dimap f g (RouteDuplex enc dec) = RouteDuplex (f >>> enc) (g <$> dec)
 
 -- | Uses a given codec to parse a value of type `o` out of String representing
 -- | the path, query and fragment (hash) of a URI (see
 -- | [URI - generic syntax](https://en.wikipedia.org/wiki/Uniform_Resource_Identifier#Generic_syntax))
 -- | or produce a `RouteError` if parsing fails.
-parse :: forall i o. RouteDuplex i o -> String -> Either Parser.RouteError o
+parse :: forall i o. RouteDuplex () i o -> String -> Either Parser.RouteError o
 parse (RouteDuplex _ dec) = Parser.run dec
 
 -- | Renders a value of type `i` into a String representation of URI path,
 -- | query and fragment (hash).
-print :: forall i o. RouteDuplex i o -> i -> String
+print :: forall i o. RouteDuplex () i o -> i -> String
 print (RouteDuplex enc _) = Printer.run <<< enc
 
 -- | Strips (when parsing) or adds (when printing) a given string segment of the
@@ -98,12 +99,12 @@ print (RouteDuplex enc _) = Printer.run <<< enc
 -- | -- contrast with `path`
 -- | parse (path "/api/v1" segment)) "/api/v1/a" == Right "a"
 -- |```
-prefix :: forall a b. String -> RouteDuplex a b -> RouteDuplex a b
+prefix :: forall a b r. String -> RouteDuplex r a b -> RouteDuplex r a b
 prefix s (RouteDuplex enc dec) = RouteDuplex (\a -> Printer.put s <> enc a) (Parser.prefix s dec)
 
 -- | Similar to `prefix`. Strips (when parsing) or adds (when printing) a given
 -- | string segment from the end of the path. The same precautions for `prefix` apply here.
-suffix :: forall a b. RouteDuplex a b -> String -> RouteDuplex a b
+suffix :: forall a b r. RouteDuplex r a b -> String -> RouteDuplex r a b
 suffix (RouteDuplex enc dec) s = RouteDuplex (\a -> enc a <> Printer.put s) (dec <* Parser.prefix s (pure unit))
 
 -- | Strips (when parsing) or adds (when printing) a given String prefix,
@@ -114,7 +115,7 @@ suffix (RouteDuplex enc dec) s = RouteDuplex (\a -> enc a <> Printer.put s) (dec
 -- | parse (path "/api/v1" segment) "/api/v1/a" == Right "a"
 -- | parse (path "/api/v1" segment) "/api/v2/a" == Left (Expected "v1" "v2")
 -- |```
-path :: forall a b. String -> RouteDuplex a b -> RouteDuplex a b
+path :: forall a b r. String -> RouteDuplex r a b -> RouteDuplex r a b
 path = flip (foldr prefix) <<< String.split (Pattern "/")
 
 -- | Modifies a given codec to require a prefix of '/'.
@@ -127,7 +128,7 @@ path = flip (foldr prefix) <<< String.split (Pattern "/")
 -- |
 -- | print (root segment) "abc" == "/abc"
 -- |```
-root :: forall a b. RouteDuplex a b -> RouteDuplex a b
+root :: forall a b r. RouteDuplex r a b -> RouteDuplex r a b
 root = path ""
 
 -- | `end codec` will only suceed if `codec` succeeds and there are no
@@ -137,7 +138,7 @@ root = path ""
 -- | parse (end segment) "abc" == Right "abc"
 -- | parse (end segment) "abc/def" == Left (ExpectedEndOfPath "def")
 -- |```
-end :: forall a b. RouteDuplex a b -> RouteDuplex a b
+end :: forall a b r. RouteDuplex r a b -> RouteDuplex r a b
 end (RouteDuplex enc dec) = RouteDuplex enc (dec <* Parser.end)
 
 -- | Consumes or prints a single path segment.
@@ -153,7 +154,7 @@ end (RouteDuplex enc dec) = RouteDuplex enc (dec <* Parser.end)
 -- | print segment "hello there" == "hello%20there"
 -- | print segment "" == "/"
 -- | ```
-segment :: RouteDuplex' String
+segment :: forall r. RouteDuplex' r String
 segment = RouteDuplex Printer.put Parser.take
 
 -- | `param name` consumes or prints a query parameter with the given `name`.
@@ -164,9 +165,8 @@ segment = RouteDuplex Printer.put Parser.take
 -- | parse (param "search") "/"               == Left (MissingParam "search")
 -- | parse (optional (param "search")) "/"    == Right Nothing
 -- |```
-param :: String -> RouteDuplex' String
+param :: forall r. String -> RouteDuplex' r String
 param p = RouteDuplex (Printer.param p) (Parser.param p)
-
 
 -- | Consumes or prints a query flag (i.e. parameter without value).
 -- | **Note:** that this combinator ignores the value of the parameter. It only cares about its presence/absence.
@@ -178,11 +178,13 @@ param p = RouteDuplex (Printer.param p) (Parser.param p)
 -- | parse (flag (param "x")) "?x=false", == Right true -- value is ignored, what matters is presence of the parameter x
 -- | parse (flag (param "x")) "?y",       == Right false
 -- |```
-flag :: RouteDuplex' String -> RouteDuplex' Boolean
+flag :: forall r. RouteDuplex' r String -> RouteDuplex' r Boolean
 flag (RouteDuplex enc dec) = RouteDuplex enc' dec'
   where
   enc' true = enc ""
+
   enc' _ = mempty
+
   dec' = Parser.default false (dec $> true)
 
 -- | Repeatedly applies a given codec to parse one or more values from path segments.
@@ -192,12 +194,13 @@ flag (RouteDuplex enc dec) = RouteDuplex enc' dec'
 -- | parse (many1 (int segment)) "1/2/3/x" == Right [1,2,3]
 -- | parse (many1 (int segment)) "x",      == Left (Expected "Int" "x") :: Either RouteError (Array Int)
 -- |```
-many1 :: forall f a b.
+many1 ::
+  forall f a b r.
   Foldable f =>
   Alt f =>
   Applicative f =>
-  RouteDuplex a b ->
-  RouteDuplex (f a) (f b)
+  RouteDuplex r a b ->
+  RouteDuplex r (f a) (f b)
 many1 (RouteDuplex enc dec) = RouteDuplex (foldMap enc) (Parser.many1 dec)
 
 -- | Similar to `many1`, except also succeeds when no values can be parsed.
@@ -206,11 +209,12 @@ many1 (RouteDuplex enc dec) = RouteDuplex (foldMap enc) (Parser.many1 dec)
 -- | parse (many (int segment)) "1/2/3/x" == Right [1,2,3]
 -- | parse (many (int segment)) "x",      == Right []
 -- |```
-many :: forall f a b.
+many ::
+  forall f a b r.
   Foldable f =>
   Alternative f =>
-  RouteDuplex a b ->
-  RouteDuplex (f a) (f b)
+  RouteDuplex r a b ->
+  RouteDuplex r (f a) (f b)
 many (RouteDuplex enc dec) = RouteDuplex (foldMap enc) (Parser.many dec)
 
 -- | Consumes or prints all the remaining segments.
@@ -221,7 +225,7 @@ many (RouteDuplex enc dec) = RouteDuplex (foldMap enc) (Parser.many dec)
 -- |
 -- | print rest ["a", "b"] == "a/b"
 -- |```
-rest :: RouteDuplex' (Array String)
+rest :: forall r. RouteDuplex' r (Array String)
 rest = RouteDuplex (foldMap Printer.put) Parser.rest
 
 -- | Sets a default value which will be returned when parsing fails.
@@ -231,7 +235,7 @@ rest = RouteDuplex (foldMap Printer.put) Parser.rest
 -- | parse (default 0 $ int segment) "1" == Right 1
 -- | parse (default 0 $ int segment) "x" == Right 0
 -- |```
-default :: forall a b. b -> RouteDuplex a b -> RouteDuplex a b
+default :: forall a b r. b -> RouteDuplex r a b -> RouteDuplex r a b
 default d (RouteDuplex enc dec) = RouteDuplex enc (Parser.default d dec)
 
 -- | Augments the behavior of a given codec by making it return `Nothing` if parsing
@@ -244,7 +248,7 @@ default d (RouteDuplex enc dec) = RouteDuplex enc (Parser.default d dec)
 -- | print (optional segment) (Just "a") == "a"
 -- | print (optional segment) Nothing    == ""
 -- |```
-optional :: forall a b. RouteDuplex a b -> RouteDuplex (Maybe a) (Maybe b)
+optional :: forall a b r. RouteDuplex r a b -> RouteDuplex r (Maybe a) (Maybe b)
 optional (RouteDuplex enc dec) = RouteDuplex (foldMap enc) (Parser.optional dec)
 
 -- | Builds a codec for a custom type out of printer and parser functions.
@@ -266,7 +270,7 @@ optional (RouteDuplex enc dec) = RouteDuplex (foldMap enc) (Parser.optional dec)
 -- | sort :: RouteDuplex' String -> RouteDuplex' Sort
 -- | sort = as sortToString sortFromString
 -- |```
-as :: forall s a b. (a -> s) -> (String -> Either String b) -> RouteDuplex s String -> RouteDuplex a b
+as :: forall s a b r. (a -> s) -> (String -> Either String b) -> RouteDuplex r s String -> RouteDuplex r a b
 as f g (RouteDuplex enc dec) = RouteDuplex (enc <<< f) (Parser.as identity g dec)
 
 -- | Refines a codec of Strings to Ints.
@@ -277,7 +281,7 @@ as f g (RouteDuplex enc dec) = RouteDuplex (enc <<< f) (Parser.as identity g dec
 -- |
 -- | print (int segment) 1    == "1"
 -- | ```
-int :: RouteDuplex' String -> RouteDuplex' Int
+int :: forall r. RouteDuplex' r String -> RouteDuplex' r Int
 int = as show Parser.int
 
 -- | Refines a codec of Strings to Booleans, where `true` and `false` are the
@@ -289,12 +293,12 @@ int = as show Parser.int
 -- |
 -- | print (boolean segment) true    == "true"
 -- | ```
-boolean :: RouteDuplex' String -> RouteDuplex' Boolean
+boolean :: forall r. RouteDuplex' r String -> RouteDuplex' r Boolean
 boolean = as show Parser.boolean
 
 -- | This does nothing (internally it's defined as identity).
 -- | It can be used to restrict a type parameter of a polymorphic `RouteDuplex' a` to `String`.
-string :: RouteDuplex' String -> RouteDuplex' String
+string :: forall r. RouteDuplex' r String -> RouteDuplex' r String
 string = identity
 
 -- | Combined with `prop` or `:=`, builds a Record where the order of
@@ -310,25 +314,25 @@ string = identity
 -- | parse (path "blog" date) "blog/2019/1/2" ==
 -- |   Right { year: 2019, month: 1, day: 2 }
 -- | ````
-record :: forall r. RouteDuplex r {}
+record :: forall r a. RouteDuplex r a {}
 record = RouteDuplex mempty (pure {})
 
 -- | See `record`.
-prop :: forall sym a b r1 r2 r3 rx.
+prop ::
+  forall sym a b r r1 r2 r3 rx.
   IsSymbol sym =>
   Row.Cons sym a rx r1 =>
   Row.Cons sym b r2 r3 =>
   Row.Lacks sym r2 =>
   SProxy sym ->
-  RouteDuplex a b ->
-  RouteDuplex { | r1 } { | r2 } ->
-  RouteDuplex { | r1 } { | r3 }
-prop sym (RouteDuplex f g) (RouteDuplex x y) =
-  RouteDuplex (\r -> x r <> f (Record.get sym r)) (flip (Record.insert sym) <$> y <*> g)
+  RouteDuplex r a b ->
+  RouteDuplex r { | r1 } { | r2 } ->
+  RouteDuplex r { | r1 } { | r3 }
+prop sym (RouteDuplex f g) (RouteDuplex x y) = RouteDuplex (\r -> x r <> f (Record.get sym r)) (flip (Record.insert sym) <$> y <*> g)
 
 infix 2 prop as :=
 
-class RouteDuplexParams (r1 :: # Type) (r2 :: # Type) | r1 -> r2 where
+class RouteDuplexParams (r1 :: # Type) (r2 :: # Type) (ctx :: # Type) | r1 -> r2 where
   -- | Builds a `RouteDuplex` from a record of query parameter parsers/printers, where
   -- | each property corresponds to a query parameter with the same name.
   -- |
@@ -342,33 +346,33 @@ class RouteDuplexParams (r1 :: # Type) (r2 :: # Type) | r1 -> r2 where
   -- | parse search "?page=3&filter=Galaxy%20Quest" ==
   -- |   Right { page: 3, filter: Just "Galaxy Quest" }
   -- | ```
-  params :: { | r1 } -> RouteDuplex' { | r2 }
+  params :: { | r1 } -> RouteDuplex' ctx { | r2 }
 
 instance routeDuplexParams ::
   ( RowToList r1 rl
-  , RouteDuplexBuildParams rl r1 r2 () r2
+  , RouteDuplexBuildParams rl r1 r2 () r2 ctx
   ) =>
-  RouteDuplexParams r1 r2 where
+  RouteDuplexParams r1 r2 ctx where
   params r =
     record
       # buildParams (RLProxy :: RLProxy rl) r
 
-class RouteDuplexBuildParams (rl :: RowList) (r1 :: # Type) (r2 :: # Type) (r3 :: # Type) (r4 :: # Type) | rl -> r1 r2 r3 r4 where
+class RouteDuplexBuildParams (rl :: RowList) (r1 :: # Type) (r2 :: # Type) (r3 :: # Type) (r4 :: # Type) ctx | rl -> r1 r2 r3 r4 where
   buildParams ::
     RLProxy rl ->
     { | r1 } ->
-    RouteDuplex { | r2 } { | r3 } ->
-    RouteDuplex { | r2 } { | r4 }
+    RouteDuplex ctx { | r2 } { | r3 } ->
+    RouteDuplex ctx { | r2 } { | r4 }
 
 instance buildParamsCons ::
   ( IsSymbol sym
-  , Row.Cons sym (RouteDuplex String String -> RouteDuplex a b) rx1 r1
+  , Row.Cons sym (RouteDuplex ctx String String -> RouteDuplex ctx a b) rx1 r1
   , Row.Cons sym a rx2 r2
   , Row.Cons sym b r3 rx3
   , Row.Lacks sym r3
-  , RouteDuplexBuildParams rest r1 r2 rx3 r4
+  , RouteDuplexBuildParams rest r1 r2 rx3 r4 ctx
   ) =>
-  RouteDuplexBuildParams (Cons sym (RouteDuplex String String -> RouteDuplex a b) rest) r1 r2 r3 r4 where
+  RouteDuplexBuildParams (Cons sym (RouteDuplex ctx String String -> RouteDuplex ctx a b) rest) r1 r2 r3 r4 ctx where
   buildParams _ r prev =
     prev
       # prop sym ((Record.get sym r) (param (reflectSymbol sym)))
@@ -377,5 +381,5 @@ instance buildParamsCons ::
     sym = SProxy :: SProxy sym
 
 instance buildParamsNil ::
-  RouteDuplexBuildParams Nil r1 r2 r3 r3 where
-    buildParams _ r = identity
+  RouteDuplexBuildParams Nil r1 r2 r3 r3 ctx where
+  buildParams _ r = identity

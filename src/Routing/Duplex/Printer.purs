@@ -18,34 +18,34 @@ import Data.Tuple (Tuple(..), uncurry)
 import Global.Unsafe (unsafeEncodeURIComponent)
 import Routing.Duplex.Types (RouteState, emptyRouteState)
 
-newtype RoutePrinter = RoutePrinter (RouteState -> RouteState)
+newtype RoutePrinter r = RoutePrinter (RouteState r -> RouteState r)
 
-derive instance newtypeRoutePrinter :: Newtype RoutePrinter _
+derive instance newtypeRoutePrinter :: Newtype (RoutePrinter r) _
 
-instance semigroupRoutePrinter :: Semigroup RoutePrinter where
+instance semigroupRoutePrinter :: Semigroup (RoutePrinter r) where
   append (RoutePrinter f) (RoutePrinter g) = RoutePrinter (f >>> g)
 
-instance monoidRoutePRinter :: Monoid RoutePrinter where
+instance monoidRoutePRinter :: Monoid (RoutePrinter r) where
   mempty = RoutePrinter identity
 
-put :: String -> RoutePrinter
+put :: forall r. String -> RoutePrinter r
 put str = RoutePrinter \state -> state { segments = Array.snoc state.segments str }
 
-param :: String -> String -> RoutePrinter
+param :: forall r. String -> String -> RoutePrinter r
 param key val = RoutePrinter \state -> state { params = Array.cons (Tuple key val) state.params }
 
-flag :: String -> Boolean -> RoutePrinter
+flag :: forall r. String -> Boolean -> RoutePrinter r
 flag key val
   | val = param key ""
   | otherwise = mempty
 
-hash :: String -> RoutePrinter
+hash :: forall r. String -> RoutePrinter r
 hash h = RoutePrinter _ { hash = h }
 
-run :: RoutePrinter -> String
+run :: RoutePrinter () -> String
 run = printPath <<< applyFlipped emptyRouteState <<< unwrap
 
-printPath :: RouteState -> String
+printPath :: RouteState () -> String
 printPath { segments, params, hash: hash' } =
   printSegments segments <> printParams params <> printHash hash'
   where

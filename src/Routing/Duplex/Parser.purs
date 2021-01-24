@@ -45,14 +45,14 @@ import Data.Tuple as Tuple
 import Global.Unsafe (unsafeDecodeURIComponent)
 import Routing.Duplex.Types (RouteParams, RouteState)
 
-data RouteResult a
+data RouteResult r a
   = Fail RouteError
-  | Success RouteState a
+  | Success (RouteState r) a
 
-derive instance eqRouteResult :: Eq a => Eq (RouteResult a)
-derive instance functorRouteResult :: Functor RouteResult
-derive instance genericRouteResult :: Generic (RouteResult a) _
-instance showRouteResult :: Show a => Show (RouteResult a) where show = genericShow
+derive instance eqRouteResult :: (Eq (RouteState r), Eq a) => Eq (RouteResult r a)
+derive instance functorRouteResult :: Functor (RouteResult r)
+derive instance genericRouteResult :: Generic (RouteResult r a) _
+instance showRouteResult :: (Show (RouteState r), Show a) => Show (RouteResult r a) where show = genericShow
 
 data RouteError
   = Expected String String
@@ -64,23 +64,23 @@ derive instance eqRouteError :: Eq RouteError
 derive instance genericRouteError :: Generic RouteError _
 instance showRouteError :: Show RouteError where show = genericShow
 
-data RouteParser a
-  = Alt (NonEmptyArray (RouteParser a))
-  | Chomp (RouteState -> RouteResult a)
-  | Prefix String (RouteParser a)
+data RouteParser r a
+  = Alt (NonEmptyArray (RouteParser r a))
+  | Chomp (RouteState r -> RouteResult r a)
+  | Prefix String (RouteParser r a)
 
-derive instance functorRouteParser :: Functor RouteParser
+derive instance functorRouteParser :: Functor (RouteParser r)
 
-instance applyRouteParser :: Apply RouteParser where
+instance applyRouteParser :: Apply (RouteParser r) where
   apply fx x = Chomp \state ->
     case runRouteParser state fx of
       Fail err -> Fail err
       Success state' f -> f <$> runRouteParser state' x
 
-instance applicativeRouteParser :: Applicative RouteParser where
+instance applicativeRouteParser :: Applicative (RouteParser r) where
   pure = Chomp <<< flip Success
 
-instance altRouteParser :: Alt RouteParser where
+instance altRouteParser :: Alt (RouteParser r) where
   alt (Alt ls) (Alt rs) = Alt (ls `altAppend` rs)
   alt (Alt ls) b = Alt (ls `altSnoc` b)
   alt a (Alt rs) = Alt (a `altCons` rs)
@@ -88,17 +88,17 @@ instance altRouteParser :: Alt RouteParser where
     | pre == pre' = Prefix pre (a <|> b)
   alt a b = Alt (NEA.cons a (NEA.singleton b))
 
-instance lazyRouteParser :: Lazy (RouteParser a) where
+instance lazyRouteParser :: Lazy (RouteParser r a) where
   defer k =
     Chomp \state ->
       runRouteParser state (Z.force parser)
     where
     parser = Z.defer k
 
-altAppend :: forall a.
-  NonEmptyArray (RouteParser a) ->
-  NonEmptyArray (RouteParser a) ->
-  NonEmptyArray (RouteParser a)
+altAppend :: forall a r.
+  NonEmptyArray (RouteParser r a) ->
+  NonEmptyArray (RouteParser r a) ->
+  NonEmptyArray (RouteParser r a)
 altAppend ls rs
   | Prefix pre a <- NEA.last ls
   , Prefix pre' b <- NEA.head rs
@@ -112,34 +112,34 @@ altAppend ls rs
           Nothing  -> rs'
   | otherwise = ls <> rs
 
-altCons :: forall a.
-  RouteParser a ->
-  NonEmptyArray (RouteParser a) ->
-  NonEmptyArray (RouteParser a)
+altCons :: forall a r.
+  RouteParser r a ->
+  NonEmptyArray (RouteParser r a) ->
+  NonEmptyArray (RouteParser r a)
 altCons (Prefix pre a) rs
   | Prefix pre' b <- NEA.head rs
   , pre == pre' =
       NEA.cons' (Prefix pre (a <|> b)) (NEA.tail rs)
 altCons a rs = NEA.cons a rs
 
-altSnoc :: forall a.
-  NonEmptyArray (RouteParser a) ->
-  RouteParser a ->
-  NonEmptyArray (RouteParser a)
+altSnoc :: forall a r.
+  NonEmptyArray (RouteParser r a) ->
+  RouteParser r a ->
+  NonEmptyArray (RouteParser r a)
 altSnoc ls (Prefix pre b)
   | Prefix pre' a <- NEA.last ls
   , pre == pre' =
       NEA.snoc' (NEA.init ls) (Prefix pre (a <|> b))
 altSnoc ls b = NEA.snoc ls b
 
-chompPrefix :: String -> RouteState -> RouteResult Unit
+chompPrefix :: forall r. String -> RouteState r -> RouteResult r Unit
 chompPrefix pre state =
   case Array.head state.segments of
     Just pre' | pre == pre' -> Success (state { segments = Array.drop 1 state.segments }) unit
     Just pre' -> Fail $ Expected pre pre'
     _ -> Fail $ EndOfPath
 
-runRouteParser :: forall a. RouteState -> RouteParser a -> RouteResult a
+runRouteParser :: forall a r. RouteState r -> RouteParser r a -> RouteResult r a
 runRouteParser = go
   where
   go state = case _ of
@@ -153,7 +153,7 @@ runRouteParser = go
   goAlt state (Fail _) p = runRouteParser state p
   goAlt _ res _ = res
 
-parsePath :: String -> RouteState
+parsePath :: String -> RouteState ()
 parsePath =
   splitAt (flip Tuple "") "#"
     >>> lmap splitPath
@@ -184,57 +184,57 @@ parsePath =
       Just ix -> Tuple (String.take ix str) (String.drop (ix + String.length p) str)
       Nothing -> k str
 
-run :: forall a. RouteParser a -> String -> Either RouteError a
+run :: forall a. RouteParser () a -> String -> Either RouteError a
 run p = parsePath >>> flip runRouteParser p >>> case _ of
   Fail err -> Left err
   Success _ res -> Right res
 
-prefix :: forall a. String -> RouteParser a -> RouteParser a
+prefix :: forall a r. String -> RouteParser r a -> RouteParser r a
 prefix = Prefix
 
-take :: RouteParser String
+take :: forall r. RouteParser r String
 take = Chomp \state ->
   case Array.uncons state.segments of
     Just { head, tail } -> Success (state { segments = tail }) head
     _ -> Fail EndOfPath
 
-param :: String -> RouteParser String
+param :: forall r. String -> RouteParser r String
 param key = Chomp \state ->
   case Tuple.lookup key state.params of
     Just a -> Success state a
     _ -> Fail $ MissingParam key
 
-flag :: String -> RouteParser Boolean
+flag :: forall r. String -> RouteParser r Boolean
 flag = default false <<< map (const true) <<< param
 
-many1 :: forall t a. Alt t => Applicative t => RouteParser a -> RouteParser (t a)
+many1 :: forall r t a. Alt t => Applicative t => RouteParser r a -> RouteParser r (t a)
 many1 p = Chomp go
   where
-  go :: RouteState -> RouteResult (t a)
+  go :: RouteState r -> RouteResult r (t a)
   go state =
     case runRouteParser state p of
       Fail err -> Fail err
       Success state' a -> go' state' (pure a)
 
-  go' :: RouteState -> t a -> RouteResult (t a)
+  go' :: RouteState r -> t a -> RouteResult r (t a)
   go' state xs =
     case runRouteParser state p of
       Fail err -> Success state xs
       Success state' a -> go' state' (xs <|> pure a)
 
-many :: forall t a. Alternative t => RouteParser a -> RouteParser (t a)
+many :: forall r t a. Alternative t => RouteParser r a -> RouteParser r (t a)
 many p = many1 p <|> pure empty
 
-rest :: RouteParser (Array String)
+rest :: forall r. RouteParser r (Array String)
 rest = Chomp \state -> Success (state { segments = [] }) state.segments
 
-default :: forall a. a -> RouteParser a -> RouteParser a
+default :: forall a r. a -> RouteParser r a -> RouteParser r a
 default = flip (<|>) <<< pure
 
-optional :: forall a. RouteParser a -> RouteParser (Maybe a)
+optional :: forall a r. RouteParser r a -> RouteParser r (Maybe a)
 optional = default Nothing <<< map Just
 
-as :: forall a b. (a -> String) -> (a -> Either String b) -> RouteParser a -> RouteParser b
+as :: forall a b r. (a -> String) -> (a -> Either String b) -> RouteParser r a -> RouteParser r b
 as print decode p = Chomp \state ->
   case runRouteParser state p of
     Fail err -> Fail err
@@ -246,10 +246,10 @@ as print decode p = Chomp \state ->
 int :: String -> Either String Int
 int = maybe (Left "Int") Right <<< Int.fromString
 
-hash :: RouteParser String
+hash :: forall r. RouteParser r String
 hash = Chomp \state -> Success state state.hash
 
-end :: RouteParser Unit
+end :: forall r. RouteParser r Unit
 end = Chomp \state ->
   case Array.head state.segments of
     Nothing -> Success state unit
